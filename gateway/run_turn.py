@@ -3813,7 +3813,6 @@ class GatewayTurnMixin:
         response: Any, result: Any, stream_task: Any,
     ) -> Any:
         """Run the queued / interrupting follow-up as the next turn (recursive ``_run_agent``)."""
-        from gateway.platforms.base import merge_pending_message_event
         from gateway.run import _preserve_queued_followup_history_offset
         source, session_id, session_key, run_generation = (
             turn_ctx.source, turn_ctx.session_id, turn_ctx.session_key, turn_ctx.run_generation,
@@ -3836,8 +3835,16 @@ class GatewayTurnMixin:
                 "queueing message instead of recursing.", _interrupt_depth, session_key,
             )
             adapter = self._delivery_adapter_for(source)
-            if adapter and pending_event:
-                merge_pending_message_event(adapter._pending_messages, session_key, pending_event)
+            if adapter and hasattr(adapter, "_pending_messages"):
+                # The drain already promoted the NEXT FIFO event into this slot.
+                # Put this unexecuted head back without replacing that accepted
+                # event (an async result may already be durably acknowledged).
+                from gateway.platforms.base import MessageEvent
+                deferred = pending_event or MessageEvent(text=pending, source=source)
+                staged = adapter._pending_messages.get(session_key)
+                if staged is not None and staged is not deferred:
+                    self._session_state(session_key).conversation.queued_events.insert(0, staged)
+                adapter._pending_messages[session_key] = deferred
             elif adapter and hasattr(adapter, 'queue_message'):
                 adapter.queue_message(session_key, pending)
             return turn_ctx.result_holder[0] or {"final_response": response, "messages": history}
